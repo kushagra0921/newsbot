@@ -6,36 +6,28 @@ import os
 import sqlite3
 import hashlib
 
-# ================== DB PATH ==================
+# ================== PATHS ==================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "chat.db")
 
-# ================== DB HELPER ==================
+# ================== DATABASE ==================
 
-def execute_db(query, params=(), fetch=False):
-    conn = sqlite3.connect(DB_PATH)
+def get_db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute(query, params)
+    return conn
 
-    if fetch:
-        rows = cur.fetchall()
-        conn.close()
-        return rows
+db = get_db()
 
-    conn.commit()
-    conn.close()
-
-# ================== INIT TABLE ==================
-
-execute_db("""
+db.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE,
     password TEXT
 )
 """)
+db.commit()
 
 # ================== APP ==================
 
@@ -60,26 +52,28 @@ class ChatRequest(BaseModel):
 
 # ================== AUTH HELPERS ==================
 
-def hash_password(p: str):
-    return hashlib.sha256(p.encode()).hexdigest()
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
 
-def verify_password(p: str, h: str):
-    return hash_password(p) == h
+def verify_password(password: str, hashed: str) -> bool:
+    return hash_password(password) == hashed
 
 # ================== USER MEMORY ==================
 
-user_memory = {}  # { user_id: "AI" | "TECH" | None }
+# In-memory preference store
+# { user_id: "AI" | "TECH" | None }
+user_memory = {}
 
 # ================== NEWS ==================
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
-def fetch_news(query):
+def fetch_news(query: str):
     if not NEWS_API_KEY:
         return []
 
     try:
-        res = requests.get(
+        response = requests.get(
             "https://newsapi.org/v2/everything",
             params={
                 "q": query,
@@ -88,11 +82,11 @@ def fetch_news(query):
                 "pageSize": 5,
                 "apiKey": NEWS_API_KEY
             },
-            timeout=5
+            timeout=6
         )
-        data = res.json()
+        data = response.json()
         return [a["title"] for a in data.get("articles", []) if a.get("title")]
-    except:
+    except Exception:
         return []
 
 def clean_headlines(headlines):
@@ -114,31 +108,33 @@ def summarize(headlines, category):
 
 @app.get("/")
 def health():
-    return {"status": "ok"}
+    return {"status": "Backend running 🚀"}
 
 # ================== AUTH ==================
 
 @app.post("/register")
 def register(data: AuthRequest):
     try:
-        execute_db(
+        db.execute(
             "INSERT INTO users (username, password) VALUES (?, ?)",
             (data.username, hash_password(data.password))
         )
+        db.commit()
         return {"status": "registered"}
-    except:
+    except sqlite3.IntegrityError:
         return {"error": "Username already exists"}
 
 @app.post("/login")
 def login(data: AuthRequest):
-    rows = execute_db(
+    row = db.execute(
         "SELECT id, password FROM users WHERE username=?",
-        (data.username,),
-        fetch=True
-    )
-    if not rows or not verify_password(data.password, rows[0]["password"]):
+        (data.username,)
+    ).fetchone()
+
+    if not row or not verify_password(data.password, row["password"]):
         return {"error": "Invalid credentials"}
-    return {"user_id": rows[0]["id"]}
+
+    return {"user_id": row["id"]}
 
 # ================== CHAT ==================
 
@@ -147,11 +143,11 @@ def chat(data: ChatRequest):
     if not data.message.strip():
         return {"reply": "Empty message."}
 
-    user = execute_db(
+    user = db.execute(
         "SELECT id FROM users WHERE id=?",
-        (data.user_id,),
-        fetch=True
-    )
+        (data.user_id,)
+    ).fetchone()
+
     if not user:
         return {"reply": "Invalid user. Please login again."}
 
@@ -191,3 +187,9 @@ def chat(data: ChatRequest):
         reply = "Ask for AI news, tech news, or general news."
 
     return {"reply": reply}
+
+# ================== RUN ==================
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
